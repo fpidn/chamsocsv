@@ -116,7 +116,8 @@
                         <button id="tabAdmin" onclick="switchTab('admin')"
                             class="tab-btn hidden text-sm font-semibold px-3 py-4 text-slate-400 hover:text-indigo-600">Admin</button>
                         <button id="tabAbout" onclick="switchTab('about')"
-                            class="tab-btn text-sm font-semibold px-3 py-4 text-slate-400 hover:text-indigo-600">Giới thiệu</button>
+                            class="tab-btn text-sm font-semibold px-3 py-4 text-slate-400 hover:text-indigo-600">Giới
+                            thiệu</button>
                     </nav>
                 </div>
 
@@ -399,28 +400,41 @@
          Giới thiệu về tác giả và dự án SRMH
          ══════════════════════════════════════════ -->
         <div id="tabContentAbout" class="hidden max-w-4xl mx-auto px-4 py-8">
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center sm:text-left flex flex-col sm:flex-row items-center sm:items-start gap-8 relative overflow-hidden">
+            <div
+                class="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center sm:text-left flex flex-col sm:flex-row items-center sm:items-start gap-8 relative overflow-hidden">
                 <!-- Background decoration -->
-                <div class="absolute -top-24 -right-24 w-64 h-64 bg-indigo-50 rounded-full blur-3xl opacity-50 pointer-events-none"></div>
-                <div class="absolute -bottom-24 -left-24 w-64 h-64 bg-violet-50 rounded-full blur-3xl opacity-50 pointer-events-none"></div>
+                <div
+                    class="absolute -top-24 -right-24 w-64 h-64 bg-indigo-50 rounded-full blur-3xl opacity-50 pointer-events-none">
+                </div>
+                <div
+                    class="absolute -bottom-24 -left-24 w-64 h-64 bg-violet-50 rounded-full blur-3xl opacity-50 pointer-events-none">
+                </div>
 
-                <div class="w-32 h-32 shrink-0 bg-gradient-to-br from-indigo-100 to-violet-100 rounded-full flex items-center justify-center text-5xl shadow-inner border-4 border-white z-10">
+                <div
+                    class="w-32 h-32 shrink-0 bg-gradient-to-br from-indigo-100 to-violet-100 rounded-full flex items-center justify-center text-5xl shadow-inner border-4 border-white z-10">
                     👨‍💻
                 </div>
-                
+
                 <div class="flex-1 z-10">
                     <div class="mb-4">
                         <h2 class="text-3xl font-black text-slate-800 tracking-tight">Nguyễn Thành Long</h2>
-                        <p class="text-indigo-600 font-bold tracking-widest uppercase text-xs mt-1">FPT Polytechnic International Đà Nẵng</p>
+                        <p class="text-indigo-600 font-bold tracking-widest uppercase text-xs mt-1">FPT Polytechnic
+                            International Đà Nẵng</p>
                     </div>
-                    
-                    <div class="space-y-3 text-slate-600 text-sm leading-relaxed mb-6 bg-slate-50 p-5 rounded-xl border border-slate-100">
-                        <p>Dự án <strong class="text-indigo-600">SRMH (Student Real-time Monitoring Hub) v2.2</strong> được thiết kế và phát triển với mục tiêu tạo ra một hệ thống quản lý sinh viên hiện đại, tự động hóa và tối ưu trải nghiệm người dùng.</p>
-                        <p>Với công nghệ Real-time của Supabase, ứng dụng giúp số hóa toàn bộ quy trình chăm sóc sinh viên, hỗ trợ Giảng viên và CTSV phối hợp nhịp nhàng, trực quan để mang lại những hỗ trợ kịp thời nhất.</p>
+
+                    <div
+                        class="space-y-3 text-slate-600 text-sm leading-relaxed mb-6 bg-slate-50 p-5 rounded-xl border border-slate-100">
+                        <p>Dự án <strong class="text-indigo-600">SRMH (Student Real-time Monitoring Hub) v2.2</strong>
+                            được thiết kế và phát triển với mục tiêu tạo ra một hệ thống quản lý sinh viên hiện đại, tự
+                            động hóa và tối ưu trải nghiệm người dùng.</p>
+                        <p>Với công nghệ Real-time của Supabase, ứng dụng giúp số hóa toàn bộ quy trình chăm sóc sinh
+                            viên, hỗ trợ Giảng viên và CTSV phối hợp nhịp nhàng, trực quan để mang lại những hỗ trợ kịp
+                            thời nhất.</p>
                     </div>
-                    
+
                     <div class="flex flex-wrap gap-3 justify-center sm:justify-start">
-                        <a href="mailto:longntswin@gmail.com" class="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-lg hover:shadow-indigo-200 rounded-xl text-sm font-bold transition transform hover:-translate-y-0.5">
+                        <a href="mailto:longntswin@gmail.com"
+                            class="inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow-lg hover:shadow-indigo-200 rounded-xl text-sm font-bold transition transform hover:-translate-y-0.5">
                             <span class="text-lg">📧</span> Gửi Email liên hệ
                         </a>
                     </div>
@@ -530,6 +544,19 @@
                     <span>↪️ Trả lời <strong id="replyName"></strong></span>
                     <button onclick="cancelReply()" class="hover:text-indigo-900 font-bold">✕</button>
                 </div>
+
+                <!-- Vùng chọn Tag (Tag 2 cấp) -->
+                <div id="tagContainer" class="mb-3 hidden">
+                    <div id="parentTags" class="flex flex-wrap gap-2 mb-2"></div>
+                    <div id="childTagsContainer" class="hidden pl-3 border-l-2 border-indigo-200 mt-2" style="transition: all 150ms ease">
+                        <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1" id="childTagsTitle"></div>
+                        <div id="childTags" class="flex flex-wrap gap-1.5"></div>
+                    </div>
+                </div>
+                
+                <!-- Hiển thị các Tag đã chọn ngay trên ô nhập liệu -->
+                <div id="selectedTagsContainer" class="flex flex-wrap gap-1.5 mb-2 empty:hidden"></div>
+
                 <div class="flex gap-2">
                     <input type="text" id="feedbackInput" placeholder="Nhập phản hồi..."
                         class="flex-1 px-3 py-2.5 text-sm border-2 border-slate-200 rounded-xl focus:border-indigo-500 focus:outline-none"
@@ -537,12 +564,15 @@
                     <button onclick="sendFeedback()"
                         class="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition">Gửi</button>
                 </div>
-                <label id="escalateCheckboxWrapper"
-                    class="flex items-center gap-2 mt-2 text-sm text-slate-600 cursor-pointer w-fit">
-                    <input type="checkbox" id="escalateCheckbox"
-                        class="w-4 h-4 rounded border-slate-300 text-rose-500 focus:ring-rose-500">
-                    <span class="font-medium text-rose-600">📢 Cần CTSV hỗ trợ / can thiệp</span>
-                </label>
+                <div class="flex items-center justify-between mt-2">
+                    <label id="escalateCheckboxWrapper"
+                        class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer w-fit">
+                        <input type="checkbox" id="escalateCheckbox"
+                            class="w-4 h-4 rounded border-slate-300 text-rose-500 focus:ring-rose-500">
+                        <span class="font-medium text-rose-600">📢 Cần CTSV hỗ trợ / can thiệp</span>
+                    </label>
+                    <p id="tagStatusNote" class="text-xs font-semibold hidden"></p>
+                </div>
             </div>
         </div>
     </div>
@@ -799,8 +829,10 @@
     <!-- SheetJS UMD Load -->
     <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
 
+
+
+
     <script src="config.js"></script>
     <script src="script.js"></script>
 </body>
-
 </html>
