@@ -75,6 +75,9 @@ const State = {
     charts: {},
     students: [],           // Cache danh sách sinh viên lấy từ db
     rosterSelected: null,   // SV đã chọn từ roster autocomplete (cho modal Thêm SV)
+    selectedTags: [],       // Mảng chứa các tags cha đang chọn, cấu trúc: { p: "id_cha", c: ["id_con1", ...] }
+    activeParentTag: null,  // ID tag cha đang được chọn để hiển thị hàng con
+    adminTagRole: null,     // Role mà Admin đang dùng để xem bộ tag (GV hoặc CTSV)
 
 
     // Dọn dẹp toàn bộ state về giá trị ban đầu
@@ -83,6 +86,7 @@ const State = {
         this.currentStudentId = null; this.replyParentId = null;
         this.pendingContent = null; this.foundStudentId = null;
         this.rosterSelected = null;
+        this.selectedTags = []; this.activeParentTag = null; this.adminTagRole = null;
         // Hủy tất cả Chart.js instance để tránh memory leak
         Object.values(this.charts).forEach(c => c && c.destroy && c.destroy());
         this.charts = {};
@@ -229,9 +233,45 @@ function logout() {
 //  renderStudents()      : lọc + sắp xếp + render danh sách SV
 //  studentCard(s)        : tạo HTML cho 1 thẻ sinh viên
 // ══════════════════════════════════════════════════════════════════
+async function loadTagsConfig() {
+    if (window.TAG_CONFIG && window.TAG_CONFIG.length > 0) return;
+
+    // Fetch from tag_parents and join tag_children
+    const { data: tagsData, error } = await supabase
+        .from('tag_parents')
+        .select(`
+            id, label, roles, required, order_index,
+            children:tag_children(id, label, group_type, order_index)
+        `)
+        .order('order_index', { ascending: true });
+
+    if (!error && tagsData) {
+        // Map group_type back to group for the UI components
+        window.TAG_CONFIG = tagsData.map(p => {
+            // Sort children by order_index
+            if (p.children && p.children.length > 0) {
+                p.children.sort((a, b) => a.order_index - b.order_index);
+                p.children = p.children.map(c => ({
+                    id: c.id,
+                    label: c.label,
+                    group: c.group_type
+                }));
+            } else {
+                p.children = [];
+            }
+            return p;
+        });
+    } else {
+        console.error("Lỗi khi load tags config:", error);
+        window.TAG_CONFIG = [];
+    }
+}
+
 async function initDashboard() {
     const listEl = document.getElementById('studentList');
     if (listEl) listEl.innerHTML = '<div class="text-center text-slate-400 py-16 text-sm">⏳ Đang tải dữ liệu từ Supabase...</div>';
+
+    await loadTagsConfig();
 
     // Kéo dữ liệu từ 3 bảng: students + (student_classes + feedbacks)
     const { data: stData, error } = await supabase
@@ -531,12 +571,12 @@ function studentCard(s) {
 
     const isCtsv = State.user && State.user.rawRole === 'CTSV';
     let needsCtsvAttention = false;
-    
+
     if (isCtsv && s.feedbacks && s.feedbacks.length > 0) {
         const latestFb = s.feedbacks[0]; // (Giả định danh sách feedback đã sort mới nhất lên đầu)
         const isReply = latestFb.parent_id != null;
         const hasEscalate = latestFb.content && latestFb.content.includes('[CẦN CTSV HỖ TRỢ]');
-        
+
         // Nếu comment cuối KHÔNG PHẢI CTSV, KHÔNG PHẢI là reply, và (SV bị Đỏ HOẶC có tag Hỗ trợ)
         if (latestFb.role !== 'CTSV' && !isReply && (s.status === 'red' || hasEscalate)) {
             needsCtsvAttention = true;
@@ -549,17 +589,17 @@ function studentCard(s) {
     if (isGvCnbm && s.feedbacks && s.feedbacks.length > 0) {
         const ctsvFbs = s.feedbacks.filter(f => f.role === 'CTSV' && !f.parent_id);
         if (ctsvFbs.length > 0) {
-            const sortedCtsvFbs = ctsvFbs.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+            const sortedCtsvFbs = ctsvFbs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
             const latestCtsvFb = sortedCtsvFbs[0];
             const hasReacted = latestCtsvFb.reactions && latestCtsvFb.reactions.some(r => r.code === State.user.code);
             const userLaterFbs = s.feedbacks.filter(f => f.author_code === State.user.code && new Date(f.created_at) > new Date(latestCtsvFb.created_at));
-            
+
             if (!hasReacted && userLaterFbs.length === 0) {
                 needsGvCnbmAttention = true;
             }
         }
     }
-    
+
     const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
     if (isGvCnbm && (Date.now() - latestTime) > FIFTEEN_DAYS_MS) {
         needsGvCnbmAttention = false;
@@ -631,6 +671,9 @@ async function openStudentModal(id) {
     await renderTimeline(id);
     document.getElementById('studentModal').classList.add('active');
     document.getElementById('feedbackInput').focus(); // focus input để gõ nhanh
+
+    // Khởi tạo Tags
+    if (typeof initTags === 'function') initTags();
 }
 
 function closeStudentModal() {
@@ -643,6 +686,8 @@ function closeStudentModal() {
     State.currentStudentId = null;
     State.replyParentId = null;
     State.pendingContent = null;
+    State.selectedTags = [];
+    State.activeParentTag = null;
 }
 
 // Render timeline phản hồi dạng cây (Supabase):
@@ -825,35 +870,60 @@ async function agreeWithFeedback(parentId) {
 }
 
 async function sendFeedback() {
-    const content = document.getElementById('feedbackInput').value.trim();
-    if (!content || !State.currentStudentId) return;
+    let content = document.getElementById('feedbackInput').value.trim();
+    if (!content && (!State.selectedTags || State.selectedTags.length === 0)) return;
+    if (!State.currentStudentId) return;
+    if (typeof validateTags === 'function' && !validateTags()) return;
+
+    // Chuyển tags thành văn bản và gộp luôn vào content ngay lúc này
+    if (State.selectedTags && State.selectedTags.length > 0 && typeof window.TAG_CONFIG !== 'undefined') {
+        const tagParts = [];
+        State.selectedTags.forEach(t => {
+            const pDef = window.TAG_CONFIG.find(c => c.id === t.p);
+            if (pDef) {
+                const cLabels = t.c.map(cId => {
+                    const cDef = pDef.children.find(x => x.id === cId);
+                    return cDef ? cDef.label : cId;
+                }).join(', ');
+                tagParts.push(cLabels ? `${pDef.label}: ${cLabels}` : pDef.label);
+            }
+        });
+        const tagsText = `[${tagParts.join(' | ')}] `;
+        content = (tagsText + content).trim();
+    }
 
     let newStatusToSet = null;
+    const suggestion = typeof getSuggestedStatus === 'function' ? getSuggestedStatus(State.selectedTags) : { status: null };
 
     const s = State.students.find(x => x.id === State.currentStudentId);
-    if (s && !State.replyParentId && ['GV', 'CNBM'].includes(State.user.rawRole) && ['green', 'yellow'].includes(s.status || 'green')) {
+    if (s && !State.replyParentId && ['GV', 'CNBM'].includes(State.user.rawRole)) {
         const currentStatus = s.status || 'green';
-        const currentStatusName = currentStatus === 'green' ? '🟢 Ổn định' : '🟡 Theo dõi';
+        const level = { green: 0, yellow: 1, red: 2 };
 
-        newStatusToSet = await new Promise((resolve) => {
-            const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay active';
-            overlay.style.zIndex = '9999';
+        if (suggestion.status && level[suggestion.status] > level[currentStatus]) {
+            newStatusToSet = suggestion.status;
+        } else if (['green', 'yellow'].includes(currentStatus)) {
+            const currentStatusName = currentStatus === 'green' ? '🟢 Ổn định' : '🟡 Theo dõi';
 
-            let optionsHtml = '';
-            const statuses = [
-                { id: 'red', label: '🔴 Cảnh báo', bg: 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' },
-                { id: 'yellow', label: '🟡 Theo dõi', bg: 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' },
-                { id: 'green', label: '🟢 Ổn định', bg: 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' }
-            ];
+            newStatusToSet = await new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.className = 'modal-overlay active';
+                overlay.style.zIndex = '9999';
 
-            statuses.forEach(st => {
-                if (st.id !== currentStatus) {
-                    optionsHtml += `<button class="w-full text-left px-4 py-3 border rounded-xl transition mb-3 font-bold ${st.bg}" onclick="window.resolveStatusChange('${st.id}')">Chuyển sang ${st.label}</button>`;
-                }
-            });
+                let optionsHtml = '';
+                const statuses = [
+                    { id: 'red', label: '🔴 Cảnh báo', bg: 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100' },
+                    { id: 'yellow', label: '🟡 Theo dõi', bg: 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' },
+                    { id: 'green', label: '🟢 Ổn định', bg: 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' }
+                ];
 
-            overlay.innerHTML = `
+                statuses.forEach(st => {
+                    if (st.id !== currentStatus) {
+                        optionsHtml += `<button class="w-full text-left px-4 py-3 border rounded-xl transition mb-3 font-bold ${st.bg}" onclick="window.resolveStatusChange('${st.id}')">Chuyển sang ${st.label}</button>`;
+                    }
+                });
+
+                overlay.innerHTML = `
                 <div class="bg-white w-full max-w-sm rounded-2xl p-6 shadow-xl transform transition-all relative mx-4">
                     <button onclick="window.resolveStatusChange('CANCEL')" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition text-2xl leading-none">&times;</button>
                     <h3 class="text-lg font-black text-slate-800 mb-2 pr-6">Thay đổi trạng thái?</h3>
@@ -862,15 +932,16 @@ async function sendFeedback() {
                     <button class="w-full mt-1 text-slate-600 font-bold bg-slate-50 border-slate-200 hover:bg-slate-100 py-3 px-4 rounded-xl border transition" onclick="window.resolveStatusChange(null)">Chỉ gửi bình luận (Giữ nguyên)</button>
                 </div>
             `;
-            document.body.appendChild(overlay);
+                document.body.appendChild(overlay);
 
-            window.resolveStatusChange = (status) => {
-                document.body.removeChild(overlay);
-                delete window.resolveStatusChange;
-                resolve(status);
-            };
-        });
-    }
+                window.resolveStatusChange = (status) => {
+                    document.body.removeChild(overlay);
+                    delete window.resolveStatusChange;
+                    resolve(status);
+                };
+            });
+        } // close else-if
+    } // close outer if (s && !State.replyParentId...)
 
     // Nếu người dùng bấm X để huỷ thao tác
     if (newStatusToSet === 'CANCEL') return;
@@ -1000,6 +1071,7 @@ async function doSend(content) {
         author_name: State.user.name,
         author_code: State.user.code,
         content: content,
+        tags: State.selectedTags || [],
         parent_id: State.replyParentId || null
     }]);
 
@@ -1009,6 +1081,9 @@ async function doSend(content) {
     if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
 
     document.getElementById('feedbackInput').value = '';
+    State.selectedTags = [];
+    State.activeParentTag = null;
+    if (typeof renderTagsUI === 'function') renderTagsUI();
     cancelReply();
     await renderTimeline(State.currentStudentId); // fetch lại timeline từ DB
     await initDashboard();                        // refresh data ds sinh viên ngầm
@@ -1039,13 +1114,15 @@ window.replyTo = (id, name) => {
     document.getElementById('replyName').textContent = name;
     document.getElementById('feedbackInput').placeholder = `Trả lời ${name}...`;
     document.getElementById('feedbackInput').focus();
+    if (typeof renderTagsUI === 'function') renderTagsUI();
 }
 
 // Tắt chế độ reply: reset State và UI input
 function cancelReply() {
     State.replyParentId = null;
     document.getElementById('replyBar').classList.add('hidden');
-    document.getElementById('feedbackInput').placeholder = 'Nhập phản hồi...';
+    document.getElementById('feedbackInput').placeholder = State.selectedTags && State.selectedTags.length > 0 ? 'Ghi thêm chi tiết (không bắt buộc)…' : 'Nhập phản hồi...';
+    if (typeof renderTagsUI === 'function') renderTagsUI();
 }
 
 // Toggle like/unlike: nếu đã react thì xóa, chưa thì thêm vào mảng reactions
@@ -1068,7 +1145,7 @@ async function toggleReaction(fbId) {
 // Hàm xóa bình luận tương tác với Supabase
 async function deleteFeedback(fbId) {
     if (!confirm('Bạn có chắc chắn muốn xóa bình luận này?')) return;
-    
+
     try {
         const { error } = await supabase
             .from('feedbacks')
@@ -1948,15 +2025,15 @@ function getTargetStudentsForNotif() {
 
             // BỎ RULE 24H CHO GV/CNBM CHỈ KHI CÓ CTSV FEEDBACK CHƯA XỬ LÝ (29/06 + 01/07)
             if (isGvCnbm && s.feedbacks && s.feedbacks.length > 0) {
-                 const ctsvFbs = s.feedbacks.filter(f => f.role === 'CTSV' && !f.parent_id);
-                 if (ctsvFbs.length > 0) {
-                     const latestCtsvFb = ctsvFbs.sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
-                     const hasReacted = latestCtsvFb.reactions && latestCtsvFb.reactions.some(r => r.code === State.user.code);
-                     const userLaterFbs = s.feedbacks.filter(f => f.author_code === State.user.code && new Date(f.created_at) > new Date(latestCtsvFb.created_at));
-                     
-                     // Nếu feedback gốc mới nhất từ CTSV chưa được thả tim và GV chưa comment sau đó -> BẮT BUỘC hiện thông báo (đã lọc 15 ngày ở trên)
-                     if (!hasReacted && userLaterFbs.length === 0) return true;
-                 }
+                const ctsvFbs = s.feedbacks.filter(f => f.role === 'CTSV' && !f.parent_id);
+                if (ctsvFbs.length > 0) {
+                    const latestCtsvFb = ctsvFbs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+                    const hasReacted = latestCtsvFb.reactions && latestCtsvFb.reactions.some(r => r.code === State.user.code);
+                    const userLaterFbs = s.feedbacks.filter(f => f.author_code === State.user.code && new Date(f.created_at) > new Date(latestCtsvFb.created_at));
+
+                    // Nếu feedback gốc mới nhất từ CTSV chưa được thả tim và GV chưa comment sau đó -> BẮT BUỘC hiện thông báo (đã lọc 15 ngày ở trên)
+                    if (!hasReacted && userLaterFbs.length === 0) return true;
+                }
             }
 
             // ĐÃ ĐỌC (Toàn cục): Nếu user hiện tại đã thả tim vào feedback MỚI NHẤT 
@@ -1981,21 +2058,21 @@ function getTargetStudentsForNotif() {
         targetStudents = targetStudents.filter(s => {
             const fbs = s.feedbacks || [];
             if (fbs.length === 0) return false;
-            
+
             // Tìm feedback mới nhất
             const latestFb = fbs.reduce((prev, current) => (prev.created_at > current.created_at) ? prev : current);
-            
+
             // 1. Nếu comment mới nhất là của CTSV -> Bỏ qua (Đã xử lý)
             if (latestFb.role === 'CTSV') return false;
-            
+
             // 2. Nếu CTSV đã thả tim (Đánh dấu đã đọc thủ công) -> Bỏ qua
             if (latestFb.reactions && latestFb.reactions.some(r => r.code === State.user.code)) return false;
-            
+
             // 3. Nếu comment mới nhất chỉ là reply -> Bỏ qua
             if (latestFb.parent_id != null) return false;
 
             const hasEscalate = latestFb.content && latestFb.content.includes('[CẦN CTSV HỖ TRỢ]');
-            
+
             // 4. Trạng thái Vàng/Xanh mà KHÔNG CÓ tag yêu cầu hỗ trợ -> Bỏ qua
             if (s.status !== 'red' && !hasEscalate) return false;
 
@@ -2296,7 +2373,7 @@ async function generateReport() {
 
     // Bước 4: Render header bảng
     // Mỗi <th> gắn onclick highlightCol(i) để bôi xanh cả cột
-    const cols = ['MSSV', 'Họ và tên sinh viên', 'Lớp / Mã môn', 'Giảng viên phụ trách', 'Người ghi nhận', 'Phản hồi gần nhất', 'Thời gian'];
+    const cols = ['MSSV', 'Họ và tên sinh viên', 'Lớp / Mã môn', 'Giảng viên phụ trách', 'Người ghi nhận', 'Tags', 'Phản hồi gần nhất', 'Thời gian'];
     document.getElementById('reportThead').innerHTML = `
         <tr>
             ${cols.map((c, i) => `
@@ -2323,12 +2400,30 @@ async function generateReport() {
         const authorLabel = f.author_name ? `${f.author_name} (${f.role})` : 'Ẩn danh';
         const statusMark = statusEmoji[s.status || 'green'];
 
+        // Chuyển tags từ JSON sang text
+        let tagsText = '';
+        if (f.tags && f.tags.length > 0 && typeof window.TAG_CONFIG !== 'undefined') {
+            const tagParts = [];
+            f.tags.forEach(t => {
+                const pDef = window.TAG_CONFIG.find(c => c.id === t.p);
+                if (pDef) {
+                    const cLabels = t.c.map(cId => {
+                        const cDef = pDef.children.find(x => x.id === cId);
+                        return cDef ? cDef.label : cId;
+                    }).join(', ');
+                    tagParts.push(cLabels ? `${pDef.label}: ${cLabels}` : pDef.label);
+                }
+            });
+            tagsText = tagParts.join(' | ');
+        }
+
         return `<tr>
             <td class="font-mono text-xs text-slate-500 whitespace-nowrap">${s.mssv}</td>
             <td class="font-semibold text-slate-800 whitespace-nowrap">${s.ho_ten}</td>
             <td class="text-xs text-slate-600 whitespace-nowrap">${lopDisplay}</td>
             <td class="text-xs text-slate-600 whitespace-nowrap">${s.giang_vien || 'N/A'}</td>
             <td class="text-xs text-slate-600 whitespace-nowrap">${authorLabel}</td>
+            <td class="text-xs text-slate-700 whitespace-nowrap">${tagsText}</td>
             <td class="text-sm text-slate-700" style="min-width:260px;max-width:400px">${escapeHtml(f.content)}</td>
             <td class="text-xs text-slate-400 whitespace-nowrap">${fbTime}</td>
         </tr>`;
@@ -2708,4 +2803,291 @@ async function handleExcelUpload(event) {
         pPercent.classList.replace('text-emerald-600', 'text-rose-600');
         pBtn.classList.remove('hidden');
     }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  TAGS LOGIC (Tính năng Tag 2 cấp)
+// ══════════════════════════════════════════════════════════════════
+function initTags() {
+    State.selectedTags = [];
+    State.activeParentTag = null;
+    renderTagsUI();
+}
+
+function renderTagsUI() {
+    const tagContainer = document.getElementById('tagContainer');
+    const escalateCb = document.getElementById('escalateCheckbox');
+    if (!tagContainer) return;
+
+    // Nếu đang reply, ẩn tag
+    if (State.replyParentId) {
+        tagContainer.classList.add('hidden');
+        if (escalateCb) escalateCb.disabled = false;
+        return;
+    }
+
+    tagContainer.classList.remove('hidden');
+    let userRole = State.user.rawRole;
+    if (userRole === 'Admin') {
+        userRole = State.adminTagRole || 'CTSV';
+    }
+
+    if (typeof window.TAG_CONFIG === 'undefined' || window.TAG_CONFIG.length === 0) {
+        tagContainer.classList.add('hidden');
+        return;
+    }
+
+    // Header cho tag container (Hiển thị nút switch cho Admin)
+    let adminSwitchHtml = '';
+    if (State.user.rawRole === 'Admin') {
+        adminSwitchHtml = `
+            <div class="flex items-center gap-2 mb-2">
+                <span class="text-xs font-bold text-slate-500">Bộ Tag:</span>
+                <button onclick="switchAdminTagRole('CTSV')" class="text-xs px-2 py-1 rounded-md font-bold transition-all ${userRole === 'CTSV' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">CTSV</button>
+                <button onclick="switchAdminTagRole('GV')" class="text-xs px-2 py-1 rounded-md font-bold transition-all ${userRole === 'GV' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">GV</button>
+            </div>
+        `;
+    }
+
+    // Filter parent tags by role
+    const availableParents = window.TAG_CONFIG.filter(t => t.roles && t.roles.includes(userRole));
+
+    // Render parent tags
+    const pContainer = document.getElementById('parentTags');
+    const titleLabel = `<span class="text-sm font-bold text-slate-500 mr-1 flex items-center">Điền bằng tag:</span>`;
+    pContainer.innerHTML = adminSwitchHtml + titleLabel + availableParents.map(p => {
+        const isSelected = State.selectedTags.some(t => t.p === p.id);
+        const isActive = State.activeParentTag === p.id;
+        const btnClass = isSelected
+            ? 'bg-indigo-600 text-white shadow-md border-indigo-600'
+            : (isActive ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300 hover:text-indigo-600');
+
+        return `<button onclick="toggleParentTag('${p.id}')"
+            class="px-3 py-1.5 rounded-full border text-sm font-bold transition-all duration-150 flex items-center gap-1 ${btnClass}"
+            style="min-height:36px">
+            ${p.label}
+        </button>`;
+    }).join('');
+
+    // Render child tags if active parent
+    const cContainer = document.getElementById('childTagsContainer');
+    const cTagsWrap = document.getElementById('childTags');
+    const cTitle = document.getElementById('childTagsTitle');
+
+    if (State.activeParentTag) {
+        const pDef = window.TAG_CONFIG.find(t => t.id === State.activeParentTag);
+        if (pDef && pDef.children && pDef.children.length > 0) {
+            cContainer.classList.remove('hidden');
+            cTitle.textContent = pDef.label + (pDef.required ? ' (Bắt buộc chọn)' : '');
+
+            const selectedP = State.selectedTags.find(t => t.p === pDef.id);
+            const selectedChildren = selectedP ? selectedP.c : [];
+
+            cTagsWrap.innerHTML = pDef.children.map(c => {
+                const isCSelected = selectedChildren.includes(c.id);
+                const cClass = isCSelected
+                    ? 'bg-indigo-100 text-indigo-700 border-indigo-300 font-bold'
+                    : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100';
+
+                return `<button onclick="toggleChildTag('${c.id}')"
+                    class="px-3 py-1 rounded-full border text-xs transition-all duration-150 ${cClass}">
+                    ${c.label}
+                </button>`;
+            }).join('');
+        } else {
+            cContainer.classList.add('hidden');
+        }
+    } else {
+        cContainer.classList.add('hidden');
+    }
+
+    // Render selected tags in the input box container
+    const selectedTagsContainer = document.getElementById('selectedTagsContainer');
+    if (selectedTagsContainer) {
+        let selectedHtml = '';
+        State.selectedTags.forEach(t => {
+            const pDef = window.TAG_CONFIG.find(c => c.id === t.p);
+            if (pDef) {
+                if (t.c.length === 0) {
+                    selectedHtml += `
+                        <span class="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 text-[11px] font-bold rounded-md">
+                            ${pDef.label}
+                            <button onclick="removeSelectedTag('${pDef.id}', null)" class="w-4 h-4 ml-1 hover:bg-indigo-200 rounded-full flex items-center justify-center opacity-70 hover:opacity-100 transition-all">&times;</button>
+                        </span>
+                    `;
+                } else {
+                    t.c.forEach(cId => {
+                        const cDef = pDef.children.find(x => x.id === cId);
+                        if (cDef) {
+                            selectedHtml += `
+                                <span class="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 bg-indigo-50 border border-indigo-200 text-indigo-700 text-[11px] font-bold rounded-md">
+                                    ${pDef.label}: ${cDef.label}
+                                    <button onclick="removeSelectedTag('${pDef.id}', '${cDef.id}')" class="w-4 h-4 ml-1 hover:bg-indigo-200 rounded-full flex items-center justify-center opacity-70 hover:opacity-100 transition-all">&times;</button>
+                                </span>
+                            `;
+                        }
+                    });
+                }
+            }
+        });
+        selectedTagsContainer.innerHTML = selectedHtml;
+    }
+
+    updateTagStatusNote();
+}
+
+function toggleParentTag(pId) {
+    const pIndex = State.selectedTags.findIndex(t => t.p === pId);
+
+    if (pIndex > -1) {
+        if (State.activeParentTag === pId) {
+            // Click lần 2 vào tag cha đang active → bỏ chọn hoàn toàn
+            State.selectedTags.splice(pIndex, 1);
+            State.activeParentTag = null;
+        } else {
+            // Đã chọn nhưng chưa active → chỉ hiển thị hàng con
+            State.activeParentTag = pId;
+        }
+    } else {
+        // Chưa chọn → chọn tag cha
+        State.selectedTags.push({ p: pId, c: [] });
+        State.activeParentTag = pId;
+    }
+    renderTagsUI();
+}
+
+function toggleChildTag(cId) {
+    if (!State.activeParentTag) return;
+
+    const pDef = window.TAG_CONFIG.find(t => t.id === State.activeParentTag);
+    if (!pDef) return;
+    const cDef = pDef.children.find(c => c.id === cId);
+    if (!cDef) return;
+
+    const pObj = State.selectedTags.find(t => t.p === State.activeParentTag);
+    if (!pObj) return;
+
+    const cIndex = pObj.c.indexOf(cId);
+    if (cIndex > -1) {
+        // Bỏ chọn tag con
+        pObj.c.splice(cIndex, 1);
+    } else {
+        // Thêm tag con — nếu group là 'moc' hoặc 'one' thì chỉ cho chọn 1
+        if (cDef.group === 'moc' || cDef.group === 'one') {
+            const otherGroupIds = pDef.children.filter(x => x.group === cDef.group).map(x => x.id);
+            pObj.c = pObj.c.filter(id => !otherGroupIds.includes(id));
+        }
+        pObj.c.push(cId);
+    }
+    renderTagsUI();
+}
+
+function removeSelectedTag(pId, cId) {
+    const pObjIndex = State.selectedTags.findIndex(t => t.p === pId);
+    if (pObjIndex === -1) return;
+
+    if (cId === null) {
+        // Remove parent entirely
+        State.selectedTags.splice(pObjIndex, 1);
+        if (State.activeParentTag === pId) State.activeParentTag = null;
+    } else {
+        // Remove specific child
+        const pObj = State.selectedTags[pObjIndex];
+        const cIndex = pObj.c.indexOf(cId);
+        if (cIndex > -1) {
+            pObj.c.splice(cIndex, 1);
+            // If it was the last child and we want to remove the parent? Let's leave parent selected without children.
+        }
+    }
+    renderTagsUI();
+}
+
+function updateTagStatusNote() {
+    const input = document.getElementById('feedbackInput');
+    const note = document.getElementById('tagStatusNote');
+    const escalateCb = document.getElementById('escalateCheckbox');
+
+    if (State.selectedTags.length > 0) {
+        input.placeholder = "Ghi thêm chi tiết (không bắt buộc)…";
+    } else {
+        if (!State.replyParentId) input.placeholder = "Nhập phản hồi...";
+    }
+
+    const suggestion = getSuggestedStatus(State.selectedTags);
+    if (suggestion.status) {
+        const emoji = { green: '🟢', yellow: '🟡', red: '🔴' }[suggestion.status];
+        note.textContent = `Gợi ý ${emoji} do chọn ${suggestion.reason}`;
+        note.classList.remove('hidden');
+    } else {
+        note.classList.add('hidden');
+    }
+
+    if (suggestion.escalate !== null && suggestion.escalate !== undefined && escalateCb) {
+        escalateCb.checked = suggestion.escalate;
+    }
+}
+
+function getSuggestedStatus(tags) {
+    let maxLevel = 0; // 0=none, 1=yellow, 2=red
+    let result = { status: null, reason: null, escalate: null };
+
+    for (const t of tags) {
+        const pDef = window.TAG_CONFIG.find(x => x.id === t.p);
+        if (!pDef) continue;
+
+        // Rules for GV
+        if (t.p === 'chuyen_can') {
+            if (t.c.includes('moc_13') || t.c.includes('moc_16')) {
+                if (maxLevel < 1) { maxLevel = 1; result = { status: 'yellow', reason: 'Chuyên cần 13/16%', escalate: false }; }
+            }
+            if (t.c.includes('moc_20') || t.c.includes('chua_di')) {
+                if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: pDef.label, escalate: true }; }
+            }
+            if (t.c.includes('moc_af')) {
+                if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: 'Chuyên cần AF', escalate: false }; }
+            }
+            if (t.c.includes('lien_tuc') || t.c.includes('di_muon')) {
+                if (maxLevel < 1) { maxLevel = 1; result = { status: 'yellow', reason: 'Vắng/đi muộn', escalate: false }; }
+            }
+        }
+        if (t.p === 'hoc_tap' || t.p === 'ky_luat') {
+            if (t.c.includes('khong_lam_bai')) {
+                if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: 'Không làm bài', escalate: false }; }
+            } else {
+                if (maxLevel < 1) { maxLevel = 1; result = { status: 'yellow', reason: pDef.label, escalate: false }; }
+            }
+        }
+        if (t.p === 'khong_lien_lac') {
+            if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: pDef.label, escalate: true }; }
+        }
+        if (t.p === 'ly_do' && t.c.includes('muon_nghi')) {
+            if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: 'Nản, muốn nghỉ học', escalate: true }; }
+        }
+
+        // Rules for CTSV
+        if (t.p === 'quyet_dinh' && (t.c.includes('bao_luu') || t.c.includes('thoi_hoc'))) {
+            if (maxLevel < 2) { maxLevel = 2; result = { status: 'red', reason: 'Thôi học/Bảo lưu', escalate: null }; }
+        }
+    }
+    return result;
+}
+
+function validateTags() {
+    for (const t of State.selectedTags) {
+        const pDef = window.TAG_CONFIG.find(x => x.id === t.p);
+        if (pDef && pDef.required && (!t.c || t.c.length === 0)) {
+            alert(`Tag "${pDef.label}" bắt buộc phải chọn ít nhất 1 tag con.`);
+            State.activeParentTag = t.p;
+            renderTagsUI();
+            return false;
+        }
+    }
+    return true;
+}
+
+function switchAdminTagRole(role) {
+    State.adminTagRole = role;
+    State.selectedTags = [];
+    State.activeParentTag = null;
+    renderTagsUI();
 }
